@@ -43,7 +43,7 @@ class FirebaseReviewTaskRepository @Inject constructor() :
                 .collection("reviewSessions").document(existingSessionId)
                 .get().await()
             if (existing.exists() && existing.getString("bookId") == BOOK_ID) {
-                return existing.toSession()
+                return toSession(existing)
             }
         }
         val groups = listGroups()
@@ -189,6 +189,8 @@ class FirebaseReviewTaskRepository @Inject constructor() :
         val session = mapOf(
             "bookId" to BOOK_ID,
             "groupId" to group.groupId,
+            "chapterId" to group.chapterId,
+            "lessonId" to group.lessonId,
             "title" to group.title,
             "sentenceIds" to group.sentenceIds,
             "skillCodes" to SKILLS.map { it.code },
@@ -209,13 +211,31 @@ class FirebaseReviewTaskRepository @Inject constructor() :
             ),
             com.google.firebase.firestore.SetOptions.merge()
         ).await()
+        val sentenceTexts = fetchSentenceTexts(group.chapterId, group.lessonId, group.groupId, group.sentenceIds)
         return ReviewTaskSession(
             sessionId = sessionRef.id,
-            group = ReviewTaskGroup(group.groupId, group.title, group.sentenceIds),
+            group = ReviewTaskGroup(group.groupId, group.title, group.sentenceIds, sentenceTexts),
             cursor = ReviewCursor(0, 0),
             skills = SKILLS,
             state = ReviewSessionState.ACTIVE
         )
+    }
+
+    private suspend fun fetchSentenceTexts(
+        chapterId: String,
+        lessonId: String,
+        groupId: String,
+        sentenceIds: List<String>
+    ): List<String> {
+        if (chapterId.isBlank() || lessonId.isBlank()) return emptyList()
+        val sentencesRef = firestore.collection("books").document(BOOK_ID)
+            .collection("chapters").document(chapterId)
+            .collection("lessons").document(lessonId)
+            .collection("groups").document(groupId)
+            .collection("sentences")
+        val snapshot = sentencesRef.get().await()
+        val textById = snapshot.documents.associate { it.id to (it.getString("text") ?: "") }
+        return sentenceIds.map { textById[it] ?: "" }
     }
 
     private suspend fun listGroups(): List<FirestoreGroup> {
@@ -233,6 +253,8 @@ class FirebaseReviewTaskRepository @Inject constructor() :
                     groups.add(
                         FirestoreGroup(
                             groupId = group.id,
+                            chapterId = chapter.id,
+                            lessonId = lesson.id,
                             title = group.getString("title") ?: "",
                             sentenceIds = sentenceIds,
                             orderInLesson = (group.getLong("orderInLesson") ?: 0L).toInt(),
@@ -259,6 +281,8 @@ class FirebaseReviewTaskRepository @Inject constructor() :
 
     private data class FirestoreGroup(
         val groupId: String,
+        val chapterId: String,
+        val lessonId: String,
         val title: String,
         val sentenceIds: List<String>,
         val orderInLesson: Int,
@@ -274,29 +298,33 @@ class FirebaseReviewTaskRepository @Inject constructor() :
             ReviewSkill("speaking", "Speaking", passScore = 60, minConfidence = 0.6f)
         )
     }
-}
 
-private fun com.google.firebase.firestore.DocumentSnapshot.toSession(): ReviewTaskSession {
-    val sentenceIds = (get("sentenceIds") as? List<*>)?.filterIsInstance<String>() ?: emptyList()
-    val sentenceIndex = (getLong("sentenceIndex") ?: 0L).toInt()
-    val skillIndex = (getLong("skillIndex") ?: 0L).toInt()
-    val state = when (getString("state")) {
-        "group_completed" -> ReviewSessionState.GROUP_COMPLETED
-        else -> ReviewSessionState.ACTIVE
+    private suspend fun toSession(
+        snapshot: com.google.firebase.firestore.DocumentSnapshot
+    ): ReviewTaskSession {
+        val sentenceIds = (snapshot.get("sentenceIds") as? List<*>)?.filterIsInstance<String>()
+            ?: emptyList()
+        val sentenceIndex = (snapshot.getLong("sentenceIndex") ?: 0L).toInt()
+        val skillIndex = (snapshot.getLong("skillIndex") ?: 0L).toInt()
+        val state = when (snapshot.getString("state")) {
+            "group_completed" -> ReviewSessionState.GROUP_COMPLETED
+            else -> ReviewSessionState.ACTIVE
+        }
+        val groupId = snapshot.getString("groupId") ?: ""
+        val chapterId = snapshot.getString("chapterId") ?: ""
+        val lessonId = snapshot.getString("lessonId") ?: ""
+        val sentenceTexts = fetchSentenceTexts(chapterId, lessonId, groupId, sentenceIds)
+        return ReviewTaskSession(
+            sessionId = snapshot.id,
+            group = ReviewTaskGroup(
+                groupId = groupId,
+                title = snapshot.getString("title") ?: "",
+                sentenceIds = sentenceIds,
+                sentenceTexts = sentenceTexts
+            ),
+            cursor = ReviewCursor(sentenceIndex, skillIndex),
+            skills = SKILLS,
+            state = state
+        )
     }
-    return ReviewTaskSession(
-        sessionId = id,
-        group = ReviewTaskGroup(
-            groupId = getString("groupId") ?: "",
-            title = getString("title") ?: "",
-            sentenceIds = sentenceIds
-        ),
-        cursor = ReviewCursor(sentenceIndex, skillIndex),
-        skills = listOf(
-            ReviewSkill("translation", "Translation", passScore = 60, minConfidence = 0.6f),
-            ReviewSkill("listening", "Listening", passScore = 60, minConfidence = 0.6f),
-            ReviewSkill("speaking", "Speaking", passScore = 60, minConfidence = 0.6f)
-        ),
-        state = state
-    )
 }
