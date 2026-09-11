@@ -1,0 +1,3 @@
+[submodule "docs/shared-design"]
+	path = docs/shared-design
+	url = git@github.com:hetaov/KnowlegeGraphDesign.git
